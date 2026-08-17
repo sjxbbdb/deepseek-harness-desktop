@@ -42,8 +42,9 @@
   .glass {
     position: absolute; inset: 0; z-index: 0;
     border-radius: inherit; overflow: hidden;
-    backdrop-filter: blur(3px);
-    filter: url(#glass-distortion);
+    backdrop-filter: blur(6px) saturate(1.3);
+    -webkit-backdrop-filter: blur(6px) saturate(1.3);
+    transform: translateZ(0);
   }
   .glass::before {
     content: ''; position: absolute; inset: 0; border-radius: inherit;
@@ -51,15 +52,16 @@
   }
   .glass::after {
     content: ''; position: absolute; inset: 0; border-radius: inherit;
-    box-shadow: inset 2px 2px 1px 0 rgba(255, 255, 255, .38),
-                inset -1px -1px 1px 1px rgba(255, 255, 255, .14),
+    border: 1px solid rgba(255, 255, 255, .16);
+    box-shadow: inset 1px 1px 0 0 rgba(255, 255, 255, .34),
+                inset -1px -1px 0 0 rgba(255, 255, 255, .08),
                 0 6px 6px rgba(0, 0, 0, .22), 0 0 20px rgba(0, 0, 0, .12);
   }
   .sheen {
     position: absolute; z-index: 1; pointer-events: none;
     width: 240px; height: 130px; left: 6%; top: -46px;
-    background: radial-gradient(ellipse, rgba(255, 255, 255, .16), transparent 70%);
-    transform: rotate(-12deg); filter: blur(2px);
+    background: radial-gradient(ellipse, rgba(255, 255, 255, .13), transparent 70%);
+    transform: rotate(-12deg);
   }
   .content { position: relative; z-index: 10; }
 
@@ -126,16 +128,6 @@
 <body>
   <div class="glow glow-a"></div>
   <div class="glow glow-b"></div>
-
-  <!-- 液态玻璃 SVG 滤镜（分形噪声 + 位移映射） -->
-  <svg style="display:none" aria-hidden="true">
-    <filter id="glass-distortion" x="0%" y="0%" width="100%" height="100%" filterUnits="objectBoundingBox">
-      <feTurbulence type="fractalNoise" baseFrequency="0.001 0.005" numOctaves="1" seed="17" result="turbulence" />
-      <feGaussianBlur in="turbulence" stdDeviation="3" result="softMap" />
-      <feDisplacementMap in="SourceGraphic" in2="softMap" scale="60"
-        xChannelSelector="R" yChannelSelector="G" />
-    </filter>
-  </svg>
 
   <div class="card" id="card">
     <div class="glass"></div>
