@@ -36,7 +36,7 @@ const BOOT_POLL_TIMEOUT = 120000;    // 启动等待上限
 const READY_MARKER = '__DSH_BOOT__'; // dsh HTML 特征串
 
 // ---- 运行时自愈（缺依赖自动下载） ----
-const RUNTIME_TAG = 'v0.1.2';          // dsh-runtime.zip 所在的 Release tag
+const RUNTIME_TAG = 'v0.1.3';          // dsh-runtime.zip 所在的 Release tag
 const RUNTIME_ASSET = 'dsh-runtime.zip'; // 运行时依赖包（node_modules 全集）
 const RUNTIME_MIRRORS = [
   'https://github.com/sjxbbdb/deepseek-harness-desktop/releases/download/' + RUNTIME_TAG + '/' + RUNTIME_ASSET,
