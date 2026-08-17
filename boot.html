@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+<title>DeepSeek Harness</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(1200px 600px at 50% -10%, #1b2333 0%, #0f1115 55%, #0b0d11 100%);
+    color: #d7dce4; font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  .card { max-width: 560px; text-align: center; padding: 40px; }
+  .logo {
+    width: 64px; height: 64px; margin: 0 auto 20px; border-radius: 16px;
+    background: linear-gradient(135deg, #4d6bfe, #7a5cff);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 30px; font-weight: 700; color: #fff;
+    box-shadow: 0 8px 30px rgba(90, 100, 255, .35);
+  }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+  .state { font-size: 13px; color: #8b93a3; margin-bottom: 24px; min-height: 18px; }
+  .spinner {
+    width: 34px; height: 34px; margin: 0 auto 18px; border-radius: 50%;
+    border: 3px solid #2a3140; border-top-color: #4d6bfe;
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error { display: none; white-space: pre-wrap; font-size: 12px; color: #ff9b9b;
+    background: #241519; border: 1px solid #4a2229; border-radius: 8px;
+    padding: 12px 14px; text-align: left; margin-bottom: 18px; max-height: 200px; overflow: auto; }
+  button {
+    display: none; background: #4d6bfe; color: #fff; border: 0; border-radius: 8px;
+    padding: 10px 26px; font-size: 14px; cursor: pointer; font-family: inherit;
+  }
+  button:hover { background: #5c78ff; }
+  .meta { margin-top: 26px; font-size: 11px; color: #565e6e; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">DSH</div>
+    <h1>DeepSeek Harness</h1>
+    <div class="state" id="state">正在启动 dsh 服务…</div>
+    <div class="spinner" id="spinner"></div>
+    <div class="error" id="error"></div>
+    <button id="retry">重试</button>
+  </div>
+  <script>
+    const qs = new URLSearchParams(location.search);
+    const payload = qs.get('state') ? JSON.parse(qs.get('state')) : { state: 'starting' };
+    const stateEl = document.getElementById('state');
+    const spinner = document.getElementById('spinner');
+    const errorEl = document.getElementById('error');
+    const retryBtn = document.getElementById('retry');
+    const apply = (p) => {
+      if (p.state === 'error' || p.state === 'stopped') {
+        spinner.style.display = 'none';
+        errorEl.style.display = 'block';
+        errorEl.textContent = p.message || '';
+        retryBtn.style.display = 'inline-block';
+        stateEl.textContent = p.state === 'stopped' ? '服务已停止' : '启动失败';
+      } else if (p.state === 'ready') {
+        stateEl.textContent = '已连接 ' + p.url;
+        spinner.style.display = 'none';
+      } else {
+        stateEl.textContent = p.message || '正在启动 dsh 服务…';
+      }
+    };
+    apply(payload);
+    retryBtn.addEventListener('click', () => window.dshDesktop && window.dshDesktop.action('retry'));
+    window.dshDesktop && window.dshDesktop.onStatus(apply);
+  </script>
+</body>
+</html>
