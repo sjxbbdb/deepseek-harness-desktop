@@ -2,60 +2,155 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self'" />
 <title>DeepSeek Harness</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; }
+  html, body { height: 100%; background: transparent; }
   body {
     display: flex; align-items: center; justify-content: center;
-    background: radial-gradient(1200px 600px at 50% -10%, #1b2333 0%, #0f1115 55%, #0b0d11 100%);
-    color: #d7dce4; font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    color: #e8ecf3; overflow: hidden;
   }
-  .card { max-width: 560px; text-align: center; padding: 40px; }
-  .logo {
-    width: 64px; height: 64px; margin: 0 auto 20px; border-radius: 16px;
-    background: linear-gradient(135deg, #4d6bfe, #7a5cff);
+  /* ---- 背景光斑（液态漂浮） ---- */
+  .glow { position: fixed; border-radius: 50%; filter: blur(80px); pointer-events: none; }
+  .glow-a {
+    width: 520px; height: 520px; left: -120px; top: -160px;
+    background: radial-gradient(circle, rgba(77, 107, 254, .38), transparent 70%);
+    animation: driftA 26s ease-in-out infinite alternate;
+  }
+  .glow-b {
+    width: 460px; height: 460px; right: -140px; bottom: -180px;
+    background: radial-gradient(circle, rgba(122, 92, 255, .32), transparent 70%);
+    animation: driftB 32s ease-in-out infinite alternate;
+  }
+  @keyframes driftA { from { transform: translate(0, 0) scale(1); } to { transform: translate(90px, 70px) scale(1.15); } }
+  @keyframes driftB { from { transform: translate(0, 0) scale(1.1); } to { transform: translate(-80px, -60px) scale(.95); } }
+
+  /* ---- 液态玻璃卡片 ---- */
+  .card {
+    position: relative;
+    max-width: 520px; width: 88%;
+    border-radius: 26px;
+    padding: 46px 44px 40px;
+    text-align: center;
+    cursor: default;
+    transition: all .7s cubic-bezier(0.175, 0.885, 0.32, 2.2);
+    isolation: isolate;
+  }
+  .glass {
+    position: absolute; inset: 0; z-index: 0;
+    border-radius: inherit; overflow: hidden;
+    backdrop-filter: blur(3px);
+    filter: url(#glass-distortion);
+  }
+  .glass::before {
+    content: ''; position: absolute; inset: 0; border-radius: inherit;
+    background: rgba(255, 255, 255, .08);
+  }
+  .glass::after {
+    content: ''; position: absolute; inset: 0; border-radius: inherit;
+    box-shadow: inset 2px 2px 1px 0 rgba(255, 255, 255, .38),
+                inset -1px -1px 1px 1px rgba(255, 255, 255, .14),
+                0 6px 6px rgba(0, 0, 0, .22), 0 0 20px rgba(0, 0, 0, .12);
+  }
+  .sheen {
+    position: absolute; z-index: 1; pointer-events: none;
+    width: 240px; height: 130px; left: 6%; top: -46px;
+    background: radial-gradient(ellipse, rgba(255, 255, 255, .16), transparent 70%);
+    transform: rotate(-12deg); filter: blur(2px);
+  }
+  .content { position: relative; z-index: 10; }
+
+  .badge {
+    width: 68px; height: 68px; margin: 0 auto 20px; border-radius: 20px;
     display: flex; align-items: center; justify-content: center;
-    font-size: 30px; font-weight: 700; color: #fff;
-    box-shadow: 0 8px 30px rgba(90, 100, 255, .35);
+    background: rgba(255, 255, 255, .10);
+    backdrop-filter: blur(6px);
+    box-shadow: inset 1px 1px 1px rgba(255,255,255,.4), inset -1px -1px 1px rgba(255,255,255,.1),
+                0 8px 24px rgba(0, 0, 0, .35);
   }
-  h1 { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
-  .state { font-size: 13px; color: #8b93a3; margin-bottom: 24px; min-height: 18px; }
+  .badge img { width: 44px; height: 44px; }
+  h1 { font-size: 21px; font-weight: 600; margin-bottom: 8px; letter-spacing: .3px; }
+  .state { font-size: 13px; color: #aab3c2; margin-bottom: 22px; min-height: 18px; }
+
   .spinner {
-    width: 34px; height: 34px; margin: 0 auto 18px; border-radius: 50%;
-    border: 3px solid #2a3140; border-top-color: #4d6bfe;
+    width: 36px; height: 36px; margin: 0 auto 18px; border-radius: 50%;
+    border: 3px solid rgba(255, 255, 255, .14); border-top-color: #4d6bfe;
     animation: spin 1s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .progress { display: none; width: 100%; height: 6px; background: #232a38; border-radius: 3px;
-    overflow: hidden; margin: 0 auto 18px; }
-  .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #4d6bfe, #7a5cff);
-    border-radius: 3px; transition: width .25s ease; }
-  .error { display: none; white-space: pre-wrap; font-size: 12px; color: #ff9b9b;
-    background: #241519; border: 1px solid #4a2229; border-radius: 8px;
-    padding: 12px 14px; text-align: left; margin-bottom: 18px; max-height: 200px; overflow: auto; }
-  button {
-    display: none; background: #4d6bfe; color: #fff; border: 0; border-radius: 8px;
-    padding: 10px 26px; font-size: 14px; cursor: pointer; font-family: inherit;
+
+  /* ---- 玻璃进度条 ---- */
+  .progress {
+    display: none; width: 100%; height: 8px; margin: 0 auto 20px;
+    border-radius: 99px; overflow: hidden;
+    background: rgba(255, 255, 255, .10);
+    box-shadow: inset 1px 1px 1px rgba(0, 0, 0, .25), inset -1px -1px 1px rgba(255, 255, 255, .12);
   }
-  button:hover { background: #5c78ff; }
-  .meta { margin-top: 26px; font-size: 11px; color: #565e6e; }
+  .progress-fill {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, #4d6bfe, #7a5cff);
+    border-radius: 99px;
+    box-shadow: 0 0 12px rgba(77, 107, 254, .65);
+    transition: width .25s ease;
+  }
+
+  .error {
+    display: none; white-space: pre-wrap; font-size: 12px; color: #ffb3b3;
+    background: rgba(255, 255, 255, .05); border: 1px solid rgba(255, 150, 150, .25);
+    border-radius: 12px; padding: 12px 14px; text-align: left;
+    margin-bottom: 18px; max-height: 200px; overflow: auto;
+  }
+
+  /* ---- 液态玻璃按钮 ---- */
+  button {
+    display: none; position: relative; overflow: hidden;
+    background: rgba(255, 255, 255, .10); color: #fff; border: 0;
+    border-radius: 14px; padding: 11px 34px; font-size: 14px; cursor: pointer;
+    font-family: inherit; backdrop-filter: blur(4px);
+    box-shadow: inset 1px 1px 1px rgba(255,255,255,.35), inset -1px -1px 1px rgba(255,255,255,.1),
+                0 4px 10px rgba(0, 0, 0, .25);
+    transition: all .7s cubic-bezier(0.175, 0.885, 0.32, 2.2);
+  }
+  button:hover {
+    transform: scale(.94);
+    background: rgba(255, 255, 255, .16);
+    box-shadow: inset 2px 2px 1px rgba(255,255,255,.45), 0 8px 22px rgba(77, 107, 254, .35);
+  }
+  button:active { transform: scale(.9); }
+  .meta { margin-top: 24px; font-size: 11px; color: #6d7686; }
 </style>
 </head>
 <body>
-  <div class="card">
-    <div class="logo">DSH</div>
-    <h1>DeepSeek Harness</h1>
-    <div class="state" id="state">正在启动 dsh 服务…</div>
-    <div class="spinner" id="spinner"></div>
-    <div class="progress" id="progressWrap">
-      <div class="progress-fill" id="progressFill"></div>
+  <div class="glow glow-a"></div>
+  <div class="glow glow-b"></div>
+
+  <!-- 液态玻璃 SVG 滤镜（分形噪声 + 位移映射） -->
+  <svg style="display:none" aria-hidden="true">
+    <filter id="glass-distortion" x="0%" y="0%" width="100%" height="100%" filterUnits="objectBoundingBox">
+      <feTurbulence type="fractalNoise" baseFrequency="0.001 0.005" numOctaves="1" seed="17" result="turbulence" />
+      <feGaussianBlur in="turbulence" stdDeviation="3" result="softMap" />
+      <feDisplacementMap in="SourceGraphic" in2="softMap" scale="60"
+        xChannelSelector="R" yChannelSelector="G" />
+    </filter>
+  </svg>
+
+  <div class="card" id="card">
+    <div class="glass"></div>
+    <div class="sheen"></div>
+    <div class="content">
+      <div class="badge"><img src="./icons/icon.png" alt="DSH" /></div>
+      <h1>DeepSeek Harness</h1>
+      <div class="state" id="state">正在启动 dsh 服务…</div>
+      <div class="spinner" id="spinner"></div>
+      <div class="progress" id="progressWrap"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="error" id="error"></div>
+      <button id="retry">重试</button>
     </div>
-    <div class="error" id="error"></div>
-    <button id="retry">重试</button>
   </div>
+
   <script>
     const qs = new URLSearchParams(location.search);
     const payload = qs.get('state') ? JSON.parse(qs.get('state')) : { state: 'starting' };
@@ -65,6 +160,7 @@
     const retryBtn = document.getElementById('retry');
     const progressWrap = document.getElementById('progressWrap');
     const progressFill = document.getElementById('progressFill');
+    const card = document.getElementById('card');
     const apply = (p) => {
       if (p.state === 'error' || p.state === 'stopped') {
         spinner.style.display = 'none';
@@ -86,6 +182,7 @@
         stateEl.textContent = '已连接 ' + p.url;
         spinner.style.display = 'none';
         progressWrap.style.display = 'none';
+        setTimeout(() => { card.style.transform = 'scale(.97)'; card.style.opacity = '0'; }, 150);
       } else {
         progressWrap.style.display = 'none';
         stateEl.textContent = p.message || '正在启动 dsh 服务…';

@@ -404,8 +404,39 @@ function stopDshService() {
 /* ------------------------------------------------------------------ */
 /* 窗口                                                                */
 /* ------------------------------------------------------------------ */
+/* Windows 11 22H2+ 支持 Mica 系统材质（窗口级液态玻璃） */
+function supportsMica() {
+  if (process.platform !== 'win32') return false;
+  try {
+    const v = process.getSystemVersion(); // 形如 10.0.22621
+    const build = Number(v.split('.').pop());
+    return build >= 22621;
+  } catch {
+    return false;
+  }
+}
+
+function setWindowGlass(on) {
+  // 启动页阶段启用 Mica（透明背景露出系统材质）；进入 DSH 主界面后关闭
+  if (!mainWindow || mainWindow.isDestroyed() || !supportsMica()) return;
+  try {
+    mainWindow.setBackgroundMaterial(on ? 'mica' : 'none');
+    dlog('setBackgroundMaterial ->', on ? 'mica' : 'none');
+  } catch (e) {
+    dlog('setBackgroundMaterial failed:', e.message);
+  }
+}
+
+function loadDshUi(url) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    setWindowGlass(false);
+    mainWindow.loadURL(url);
+  }
+}
+
 function showBootPage(payload) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  setWindowGlass(true);
   mainWindow.loadFile(path.join(__dirname, 'boot.html'), { query: { state: JSON.stringify(payload || { state: 'starting' }) } });
 }
 
@@ -424,6 +455,7 @@ async function openMainWindow() {
     title: APP_NAME,
     icon: path.join(__dirname, 'icons', 'icon.png'),
     backgroundColor: '#0f1115',
+    ...(supportsMica() ? { backgroundMaterial: 'mica' } : {}),
     autoHideMenuBar: true,
     show: false,
     webPreferences: {
@@ -458,7 +490,7 @@ async function openMainWindow() {
   ipcMain.handle('desktop:action', async (_evt, action) => {
     if (action === 'retry') {
       await startDshService(publishStatus);
-      if (serviceUrl && mainWindow) mainWindow.loadURL(serviceUrl);
+      if (serviceUrl && mainWindow) loadDshUi(serviceUrl);
     }
     if (action === 'quit') {
       quitting = true;
@@ -471,7 +503,7 @@ async function openMainWindow() {
   showBootPage({ state: 'starting' });
   await startDshService(publishStatus);
   if (serviceUrl && mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.loadURL(serviceUrl);
+    loadDshUi(serviceUrl);
   }
 }
 
@@ -486,7 +518,7 @@ function publishStatus(stateOrPayload, extra) {
     try { mainWindow.webContents.send('desktop:status', payload); } catch { /* ignore */ }
   }
   if (payload.state === 'ready') {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(payload.url);
+    if (mainWindow && !mainWindow.isDestroyed()) loadDshUi(payload.url);
   }
   if (payload.state === 'error' && mainWindow && !mainWindow.isDestroyed()) {
     showBootPage({ state: 'error', message: payload.message });
@@ -545,7 +577,7 @@ async function restartService() {
   serviceUrl = null;
   showBootPage({ state: 'starting', message: '正在重启 dsh 服务…' });
   await startDshService(publishStatus);
-  if (serviceUrl && mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(serviceUrl);
+  if (serviceUrl && mainWindow && !mainWindow.isDestroyed()) loadDshUi(serviceUrl);
 }
 
 /* ------------------------------------------------------------------ */
