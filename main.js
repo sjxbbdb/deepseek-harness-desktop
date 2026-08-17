@@ -17,6 +17,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
+const https = require('node:https');
 
 process.on('unhandledRejection', (err) => console.error('[main] unhandledRejection:', err));
 process.on('uncaughtException', (err) => console.error('[main] uncaughtException:', err));
@@ -33,6 +34,34 @@ const DEFAULT_PORT = 3080;
 const BOOT_POLL_INTERVAL = 600;      // 就绪轮询间隔 ms
 const BOOT_POLL_TIMEOUT = 120000;    // 启动等待上限
 const READY_MARKER = '__DSH_BOOT__'; // dsh HTML 特征串
+
+// ---- 运行时自愈（缺依赖自动下载） ----
+const RUNTIME_TAG = 'v0.1.1';          // dsh-runtime.zip 所在的 Release tag
+const RUNTIME_ASSET = 'dsh-runtime.zip'; // 运行时依赖包（node_modules 全集）
+const RUNTIME_MIRRORS = [
+  'https://github.com/sjxbbdb/deepseek-harness-desktop/releases/download/' + RUNTIME_TAG + '/' + RUNTIME_ASSET,
+  'https://gh-proxy.com/https://github.com/sjxbbdb/deepseek-harness-desktop/releases/download/' + RUNTIME_TAG + '/' + RUNTIME_ASSET,
+  'https://ghproxy.net/https://github.com/sjxbbdb/deepseek-harness-desktop/releases/download/' + RUNTIME_TAG + '/' + RUNTIME_ASSET,
+];
+// 运行时完整性关键文件（相对 node_modules/；缺任一即触发自愈）
+const CRITICAL_FILES = [
+  '@deepseek-ai/dsh/lib/bin.js',
+  '@deepseek-ai/dsh/package.json',
+  '@deepseek-ai/dsh-web-app/package.json',
+  '@deepseek-ai/dsh-base/package.json',
+  '@deepseek-ai/dsh-headless/package.json',
+  '@deepseek-ai/dsh-web-frontend/package.json',
+  '@deepseek-ai/cordis/package.json',
+  '@deepseek-ai/cordis-plugin-loader/package.json',
+  'commander/package.json',
+  'js-yaml/package.json',
+  'yaml/package.json',
+  'express/package.json',
+  'react/package.json',
+  'react-dom/package.json',
+  'ws/package.json',
+  'node-pty/prebuilds/win32-x64/pty.node',
+];
 
 let mainWindow = null;
 let tray = null;
@@ -96,11 +125,17 @@ function npmCacheRoots() {
   return [...new Set(roots)];
 }
 
+function runtimeRoot() {
+  // 运行时依赖根目录（内置优先，自愈下载的次之）
+  return path.join(app.getPath('userData'), 'runtime');
+}
+
 function findDshBin() {
   const candidates = [];
   if (settings.dshPkg) candidates.push(path.join(settings.dshPkg, 'lib', 'bin.js'));
   if (process.env.DSH_PKG) candidates.push(path.join(process.env.DSH_PKG, 'lib', 'bin.js'));
   candidates.push(path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'));
+  candidates.push(path.join(runtimeRoot(), 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'));
 
   // npx 缓存：<npm-cache>/_npx/*/node_modules/@deepseek-ai/dsh/lib/bin.js
   for (const root of npmCacheRoots()) {
@@ -119,6 +154,109 @@ function findDshBin() {
     if (c && fs.existsSync(c)) return c;
   }
   return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* 运行时自愈：缺依赖时自动从 Release 下载 dsh-runtime.zip           */
+/* ------------------------------------------------------------------ */
+function checkRuntimeIntegrity() {
+  // 返回缺失的关键文件（相对当前可用 runtime 根）；完全无 runtime 时返回标志
+  const roots = [__dirname, runtimeRoot()];
+  let root = null;
+  for (const r of roots) {
+    if (fs.existsSync(path.join(r, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))) { root = r; break; }
+  }
+  if (!root) return ['<dsh-runtime-missing>'];
+  return CRITICAL_FILES.filter((f) => !fs.existsSync(path.join(root, 'node_modules', f)));
+}
+
+function runtimeUrls() {
+  const urls = [];
+  if (settings.runtimeUrl && typeof settings.runtimeUrl === 'string') urls.push(settings.runtimeUrl);
+  return urls.concat(RUNTIME_MIRRORS);
+}
+
+function downloadFile(url, dest, onProgress) {
+  return new Promise((resolve, reject) => {
+    const attempt = (u, redirectsLeft) => {
+      let req;
+      try {
+        req = https.get(u, { headers: { 'User-Agent': 'dsh-desktop' } }, (res) => {
+          if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+            res.resume();
+            if (redirectsLeft <= 0) return reject(new Error('too many redirects'));
+            let loc = res.headers.location;
+            try { loc = new URL(loc, u).href; } catch { /* keep raw */ }
+            return attempt(loc, redirectsLeft - 1);
+          }
+          if (res.statusCode !== 200) {
+            res.resume();
+            return reject(new Error('HTTP ' + res.statusCode));
+          }
+          const total = Number(res.headers['content-length']) || 0;
+          let received = 0;
+          const out = fs.createWriteStream(dest);
+          res.on('data', (chunk) => {
+            received += chunk.length;
+            if (onProgress) onProgress(received, total);
+          });
+          res.pipe(out);
+          out.on('finish', () => { out.close(() => resolve()); });
+          res.on('error', (e) => { out.destroy(); reject(e); });
+          out.on('error', (e) => { out.destroy(); reject(e); });
+        });
+      } catch (e) { return reject(e); }
+      req.on('error', reject);
+      req.setTimeout(30000, () => req.destroy(new Error('download timeout')));
+    };
+    attempt(url, 5);
+  });
+}
+
+function extractZip(zipPath, destDir) {
+  return new Promise((resolve, reject) => {
+    const tar = spawn('tar', ['-xf', zipPath, '-C', destDir], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    tar.stderr.on('data', (d) => { err += d; });
+    tar.on('error', (e) => reject(e));
+    tar.on('exit', (code) => {
+      if (code === 0) return resolve();
+      // 回退：PowerShell Expand-Archive
+      const ps = spawn('powershell', ['-NoProfile', '-Command',
+        "Expand-Archive -LiteralPath '" + zipPath + "' -DestinationPath '" + destDir + "' -Force"], { stdio: ['ignore', 'ignore', 'ignore'] });
+      ps.on('error', (e) => reject(new Error('tar & ps failed: ' + (err || e.message))));
+      ps.on('exit', (code2) => (code2 === 0 ? resolve() : reject(new Error('extract failed: ' + (err || '').slice(0, 300)))));
+    });
+  });
+}
+
+async function ensureDshRuntime(onProgress) {
+  const destDir = runtimeRoot();
+  const zipPath = path.join(destDir, 'dsh-runtime.zip');
+  try { fs.mkdirSync(destDir, { recursive: true }); } catch (e) {
+    dlog('runtime dir create failed:', e.message);
+    return false;
+  }
+  for (const url of runtimeUrls()) {
+    try {
+      dlog('runtime download:', url);
+      await downloadFile(url, zipPath, (received, total) => {
+        if (onProgress && total > 0) {
+          onProgress(Math.min(99, Math.round((received / total) * 100)));
+        }
+      });
+      const st = fs.statSync(zipPath);
+      if (st.size < 30 * 1024 * 1024) throw new Error('runtime package too small: ' + st.size);
+      await extractZip(zipPath, destDir);
+      fs.rmSync(zipPath, { force: true });
+      dlog('runtime installed, integrity now:', checkRuntimeIntegrity().length === 0 ? 'OK' : 'issues remain');
+      return checkRuntimeIntegrity().length === 0;
+    } catch (e) {
+      dlog('runtime fetch failed:', url, '-', e.message);
+      try { fs.rmSync(zipPath, { force: true }); } catch { /* ignore */ }
+    }
+  }
+  return false;
 }
 
 function findNode() {
@@ -181,10 +319,21 @@ async function startDshService(onStatus) {
     // kind === 'dsh' 已在上面的 findExistingService 处理过，理论到不了这里
   }
 
+  // 依赖完整性自检：缺依赖自动下载修复（dsh-runtime.zip）
+  const issues = checkRuntimeIntegrity();
+  if (issues.length > 0) {
+    dlog('runtime integrity issues:', issues.join(', '));
+    publishStatus({ state: 'downloading', progress: 0, message: '检测到运行依赖缺失，正在自动下载 Harness 运行时…' });
+    const ok = await ensureDshRuntime((p) => {
+      publishStatus({ state: 'downloading', progress: p, message: '正在下载 Harness 运行时 ' + p + '%' });
+    });
+    dlog('ensureDshRuntime ->', ok);
+  }
+
   const dshBin = findDshBin();
   dlog('findDshBin ->', dshBin);
   if (!dshBin) {
-    onStatus('error', { message: '未找到 dsh 包入口（lib/bin.js）。请在设置中配置 DSH_PKG 路径，或先执行 npx @deepseek-ai/dsh 安装。' });
+    onStatus('error', { message: '未找到 dsh 运行时代码，且自动下载失败。请检查网络连接后点击重试。' });
     return;
   }
 

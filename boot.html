@@ -29,6 +29,10 @@
     animation: spin 1s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .progress { display: none; width: 100%; height: 6px; background: #232a38; border-radius: 3px;
+    overflow: hidden; margin: 0 auto 18px; }
+  .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #4d6bfe, #7a5cff);
+    border-radius: 3px; transition: width .25s ease; }
   .error { display: none; white-space: pre-wrap; font-size: 12px; color: #ff9b9b;
     background: #241519; border: 1px solid #4a2229; border-radius: 8px;
     padding: 12px 14px; text-align: left; margin-bottom: 18px; max-height: 200px; overflow: auto; }
@@ -46,6 +50,9 @@
     <h1>DeepSeek Harness</h1>
     <div class="state" id="state">正在启动 dsh 服务…</div>
     <div class="spinner" id="spinner"></div>
+    <div class="progress" id="progressWrap">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
     <div class="error" id="error"></div>
     <button id="retry">重试</button>
   </div>
@@ -56,17 +63,31 @@
     const spinner = document.getElementById('spinner');
     const errorEl = document.getElementById('error');
     const retryBtn = document.getElementById('retry');
+    const progressWrap = document.getElementById('progressWrap');
+    const progressFill = document.getElementById('progressFill');
     const apply = (p) => {
       if (p.state === 'error' || p.state === 'stopped') {
         spinner.style.display = 'none';
+        progressWrap.style.display = 'none';
         errorEl.style.display = 'block';
         errorEl.textContent = p.message || '';
         retryBtn.style.display = 'inline-block';
         stateEl.textContent = p.state === 'stopped' ? '服务已停止' : '启动失败';
+      } else if (p.state === 'downloading') {
+        spinner.style.display = 'block';
+        progressWrap.style.display = 'block';
+        errorEl.style.display = 'none';
+        retryBtn.style.display = 'none';
+        stateEl.textContent = p.message || '正在下载运行依赖…';
+        if (typeof p.progress === 'number') {
+          progressFill.style.width = Math.max(0, Math.min(100, p.progress)) + '%';
+        }
       } else if (p.state === 'ready') {
         stateEl.textContent = '已连接 ' + p.url;
         spinner.style.display = 'none';
+        progressWrap.style.display = 'none';
       } else {
+        progressWrap.style.display = 'none';
         stateEl.textContent = p.message || '正在启动 dsh 服务…';
       }
     };
