@@ -18,11 +18,39 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const https = require('node:https');
+const semver = require('semver');
+const appPackage = require('./package.json');
 
 process.on('unhandledRejection', (err) => console.error('[main] unhandledRejection:', err));
 process.on('uncaughtException', (err) => console.error('[main] uncaughtException:', err));
 
-const LOG_FILE = path.join(__dirname, 'main-debug.log');
+const LOG_DIR = path.join(app.getPath('userData'), 'logs');
+const LOG_FILE = path.join(LOG_DIR, 'main.log');
+const DSH_VERSION_RANGE = appPackage.dependencies?.['@deepseek-ai/dsh'] ?? '';
+const MAX_AUTO_RESTARTS = 4;
+const RESTART_BASE_DELAY = 1000;
+const LOG_MAX_BYTES = 1024 * 1024;
+const LOG_MAX_BACKUPS = 3;
+
+function rotateLogs() {
+  try {
+    if (!fs.existsSync(LOG_FILE) || fs.statSync(LOG_FILE).size <= LOG_MAX_BYTES) return;
+    for (let i = LOG_MAX_BACKUPS; i >= 1; i--) {
+      const src = i === 1 ? LOG_FILE : `${LOG_FILE}.${i - 1}`;
+      const dst = `${LOG_FILE}.${i}`;
+      try {
+        if (fs.existsSync(src)) {
+          if (fs.existsSync(dst)) fs.rmSync(dst, { force: true });
+          fs.renameSync(src, dst);
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
+try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch {}
+rotateLogs();
+
 function dlog(...args) {
   try { fs.appendFileSync(LOG_FILE, new Date().toISOString() + ' ' + args.join(' ') + '\n'); } catch {}
 }
@@ -36,7 +64,7 @@ const BOOT_POLL_TIMEOUT = 120000;    // 启动等待上限
 const READY_MARKER = '__DSH_BOOT__'; // dsh HTML 特征串
 
 // ---- 运行时自愈（缺依赖自动下载） ----
-const RUNTIME_TAG = 'v0.1.4';          // dsh-runtime.zip 所在的 Release tag
+const RUNTIME_TAG = 'v0.1.5';          // dsh-runtime.zip 所在的 Release tag
 const RUNTIME_ASSET = 'dsh-runtime.zip'; // 运行时依赖包（node_modules 全集）
 const RUNTIME_MIRRORS = [
   'https://github.com/sjxbbdb/deepseek-harness-desktop/releases/download/' + RUNTIME_TAG + '/' + RUNTIME_ASSET,
@@ -65,7 +93,13 @@ let mainWindow = null;
 let tray = null;
 let child = null;          // 我们托管启动的 dsh 子进程
 let childExited = false;
+let childManaged = false;
+let childStopRequested = false;
+let childExitShouldRestart = false;
+let restartTimer = null;
+let restartAttempts = 0;
 let serviceUrl = null;
+let tokenUrl = null;        // 新版 dsh 启动时从 stdout 解析的带 token 地址
 let settings = loadSettings();
 dlog('settings:', JSON.stringify(settings));
 let quitting = false;
@@ -103,6 +137,37 @@ function saveSettings() {
   }
 }
 
+function clearManagedRestartTimer() {
+  if (restartTimer !== null) {
+    clearTimeout(restartTimer);
+    restartTimer = null;
+  }
+}
+
+function resetManagedRestartState() {
+  restartAttempts = 0;
+  clearManagedRestartTimer();
+}
+
+function scheduleManagedRestart(reason) {
+  if (quitting || childStopRequested || restartTimer !== null) return;
+  if (restartAttempts >= MAX_AUTO_RESTARTS) {
+    notify('dsh 服务反复退出', '服务已连续退出多次，已停止自动重启。' + (reason ? `（${reason}）` : ''));
+    showBootPage({ state: 'error', message: 'dsh 服务连续退出多次，已停止自动重启。请检查日志后手动重试。' });
+    return;
+  }
+  const delay = Math.min(30000, RESTART_BASE_DELAY * (2 ** restartAttempts));
+  restartAttempts += 1;
+  dlog('scheduleManagedRestart in', String(delay), 'ms because', reason || 'unknown');
+  restartTimer = setTimeout(async () => {
+    restartTimer = null;
+    if (quitting || childStopRequested) return;
+    showBootPage({ state: 'starting', message: 'dsh 服务异常退出，正在自动重启…' });
+    await startDshService(publishStatus);
+  }, delay);
+  if (typeof restartTimer.unref === 'function') restartTimer.unref();
+}
+
 /* ------------------------------------------------------------------ */
 /* dsh 可执行入口定位                                                  */
 /* ------------------------------------------------------------------ */
@@ -128,6 +193,26 @@ function runtimeRoot() {
   return path.join(app.getPath('userData'), 'runtime');
 }
 
+function dshVersionFromBin(binPath) {
+  try {
+    const pkgPath = path.join(path.dirname(path.dirname(binPath)), 'package.json');
+    const raw = fs.readFileSync(pkgPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return typeof parsed.version === 'string' ? parsed.version : null;
+  } catch {
+    return null;
+  }
+}
+
+function isSupportedDshVersion(version) {
+  if (version === null || DSH_VERSION_RANGE === '') return true;
+  try {
+    return semver.satisfies(version, DSH_VERSION_RANGE, { includePrerelease: true });
+  } catch {
+    return true;
+  }
+}
+
 function findDshBin() {
   const candidates = [];
   if (settings.dshPkg) candidates.push(path.join(settings.dshPkg, 'lib', 'bin.js'));
@@ -148,10 +233,14 @@ function findDshBin() {
     } catch { /* ignore */ }
   }
 
-  for (const c of candidates) {
-    if (c && fs.existsSync(c)) return c;
-  }
-  return null;
+  const existing = [...new Set(candidates.filter((c) => c && fs.existsSync(c)))];
+  if (existing.length === 0) return null;
+
+  const supported = existing.find((candidate) => isSupportedDshVersion(dshVersionFromBin(candidate)));
+  if (supported !== undefined) return supported;
+
+  dlog('dsh version mismatch; expected', DSH_VERSION_RANGE, 'candidates:', existing.map((candidate) => `${dshVersionFromBin(candidate) ?? 'unknown'}@${candidate}`).join(' | '));
+  return existing[0];
 }
 
 /* ------------------------------------------------------------------ */
@@ -277,6 +366,46 @@ function probeService(port, timeoutMs = 2500) {
     const req = http.get({ host: '127.0.0.1', port, path: '/', timeout: timeoutMs }, (res) => {
       // 响应已开始：取消空闲超时（chunked 响应间隙会误触发 timeout），用总超时兜底
       req.setTimeout(0);
+      if (res.statusCode === 401 || res.statusCode === 403) {
+        // 新版 dsh 的 token 认证：服务在但凭据未知
+        res.resume();
+        res.on('end', () => done('auth'));
+        res.on('error', () => done(null));
+        return;
+      }
+      let body = '';
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => { res.destroy(); done(body.includes(READY_MARKER) ? 'dsh' : 'other'); });
+      res.on('error', () => { res.destroy(); done(null); });
+    });
+    const total = setTimeout(() => { req.destroy(); done(null); }, timeoutMs + 2000);
+    req.on('timeout', () => { req.destroy(); done(null); });
+    req.on('error', () => done(null));
+    req.on('close', () => clearTimeout(total));
+  });
+}
+
+/* 用完整 URL（可带 token）探测服务；acceptRedirect 时 3xx 视为认证通过（token mint cookie 重定向） */
+function probeServiceUrl(url, timeoutMs = 2500, acceptRedirect = false) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    let target;
+    try { target = new URL(url); } catch { return done(null); }
+    const req = http.get({ host: target.hostname, port: target.port, path: target.pathname + target.search, timeout: timeoutMs }, (res) => {
+      req.setTimeout(0);
+      if (acceptRedirect && res.statusCode >= 300 && res.statusCode < 400) {
+        res.resume();
+        res.on('end', () => done('dsh'));
+        res.on('error', () => done(null));
+        return;
+      }
+      if (res.statusCode === 401 || res.statusCode === 403) {
+        res.resume();
+        res.on('end', () => done('auth'));
+        res.on('error', () => done(null));
+        return;
+      }
       let body = '';
       res.on('data', (chunk) => { body += chunk; });
       res.on('end', () => { res.destroy(); done(body.includes(READY_MARKER) ? 'dsh' : 'other'); });
@@ -294,15 +423,19 @@ async function findExistingService() {
   for (let port = settings.port; port < settings.port + 20; port++) {
     const kind = await probeService(port);
     if (kind === 'dsh') return port;
-    if (kind === 'other') break; // 端口被别的程序占用，不再继续
+    if (kind === 'other') break;      // 端口被别的程序占用，不再继续
+    if (kind === 'auth') continue;    // 新版 dsh 但 token 未知：换端口自托管
   }
   return null;
 }
 
 async function startDshService(onStatus) {
+  childStopRequested = false;
   const existing = await findExistingService();
   dlog('findExistingService ->', existing);
   if (existing !== null) {
+    childManaged = false;
+    resetManagedRestartState();
     serviceUrl = 'http://127.0.0.1:' + existing;
     onStatus('ready', { url: serviceUrl, managed: false, port: existing });
     return;
@@ -334,28 +467,58 @@ async function startDshService(onStatus) {
     onStatus('error', { message: '未找到 dsh 运行时代码，且自动下载失败。请检查网络连接后点击重试。' });
     return;
   }
+  const dshVersion = dshVersionFromBin(dshBin);
+  if (dshVersion !== null && !isSupportedDshVersion(dshVersion)) {
+    notify('dsh 版本不匹配', '当前运行时版本为 ' + dshVersion + '，桌面端期望 ' + DSH_VERSION_RANGE + '。');
+  }
 
   const nodeCmd = findNode();
   onStatus('starting', { port });
   dlog('spawn:', nodeCmd.file, dshBin, '--port', port);
   console.log('[main] spawn:', nodeCmd.file, dshBin, '--port', port, 'cwd:', app.getPath('userData'));
 
-  child = spawn(nodeCmd.file, [dshBin, 'web', '--port', String(port)], {
+  tokenUrl = null;
+  child = spawn(nodeCmd.file, [dshBin, 'web', '--port', String(port), '--no-open'], {
     cwd: app.getPath('userData'),
     env: { ...process.env, ...nodeCmd.env },
     windowsHide: false,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  childManaged = true;
+  resetManagedRestartState();
+  childExited = false;
+  childExitShouldRestart = false;
 
   let bootLog = '';
   child.on('error', (err) => console.error('[main] child spawn error:', err));
-  child.stdout.on('data', (d) => { bootLog += d; if (process.argv.includes('--console')) process.stdout.write('[dsh] ' + d); });
+  child.stdout.on('data', (d) => {
+    bootLog += d;
+    // 新版 dsh 输出带 token 的认证地址：dsh web: http://127.0.0.1:PORT/?token=XXX
+    const m = String(d).match(/dsh web: (http:\/\/[^\s]+)/);
+    if (m && !tokenUrl) {
+      tokenUrl = m[1];
+      dlog('tokenUrl parsed');
+    }
+    if (process.argv.includes('--console')) process.stdout.write('[dsh] ' + d);
+  });
   child.stderr.on('data', (d) => { bootLog += d; if (process.argv.includes('--console')) process.stderr.write('[dsh] ' + d); });
 
   child.on('exit', (code, signal) => {
     childExited = true;
+    const wasManaged = childManaged;
+    childExitShouldRestart = wasManaged && !childStopRequested;
     child = null;
+    childManaged = false;
     if (!quitting) {
+      if (childExitShouldRestart) {
+        serviceUrl = null;
+        notify('dsh 服务已停止', '托管的服务进程已退出 (code=' + code + ', signal=' + signal + ')，正在自动重启。');
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          showBootPage({ state: 'starting', message: '托管的 dsh 服务已退出，正在自动重启…' });
+        }
+        scheduleManagedRestart('code=' + code + ', signal=' + signal);
+        return;
+      }
       notify('dsh 服务已停止', '服务进程退出 (code=' + code + ', signal=' + signal + ')。可点击托盘菜单「重启服务」。');
       if (mainWindow && !mainWindow.isDestroyed() && serviceUrl) {
         showBootPage({ state: 'stopped', message: '服务已停止，点击下方按钮重启。' });
@@ -366,16 +529,32 @@ async function startDshService(onStatus) {
   const deadline = Date.now() + BOOT_POLL_TIMEOUT;
   await new Promise((resolve) => {
     const poll = async () => {
-      const kind = await probeService(port, 800);
+      // 优先用 stdout 解析出的带 token 地址探测（新版 dsh），否则裸端口（旧版）
+      const probeTarget = tokenUrl || ('http://127.0.0.1:' + port);
+      const kind = await probeServiceUrl(probeTarget, 800, !!tokenUrl);
       if (kind === 'dsh') {
-        dlog('poll ready on port', port);
-        serviceUrl = 'http://127.0.0.1:' + port;
+        dlog('poll ready on', probeTarget);
+        serviceUrl = tokenUrl || ('http://127.0.0.1:' + port);
         onStatus('ready', { url: serviceUrl, managed: true, port });
         resolve();
         return;
       }
+      if (kind === 'auth' && tokenUrl) {
+        // 拿到 token 但地址仍拒绝：记录并继续等（服务可能还没完全就绪）
+        if (Date.now() > deadline) {
+          onStatus('error', { message: 'dsh 服务拒绝访问（token 认证失败）。请重启桌面端重试。' });
+          resolve();
+          return;
+        }
+        setTimeout(poll, BOOT_POLL_INTERVAL);
+        return;
+      }
       if (childExited) {
         dlog('poll childExited');
+        if (childExitShouldRestart && !childStopRequested) {
+          resolve();
+          return;
+        }
         onStatus('error', { message: 'dsh 服务启动失败，请查看控制台日志。\n\n' + bootLog.slice(-800) });
         resolve();
         return;
@@ -392,6 +571,9 @@ async function startDshService(onStatus) {
 }
 
 function stopDshService() {
+  childStopRequested = true;
+  childExitShouldRestart = false;
+  clearManagedRestartTimer();
   if (child && !childExited) {
     childExited = true; // 避免 exit 回调再触发通知
     try { child.kill(); } catch { /* ignore */ }
@@ -478,8 +660,16 @@ async function openMainWindow() {
     if (/^https?:/i.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
+  let allowedOrigin = null;
+  const refreshAllowedOrigin = () => {
+    try { allowedOrigin = serviceUrl ? new URL(serviceUrl).origin : null; } catch { allowedOrigin = null; }
+  };
+  refreshAllowedOrigin();
   mainWindow.webContents.on('will-navigate', (e, url) => {
-    if (url.startsWith('file:') || url.startsWith(serviceUrl)) return;
+    if (url.startsWith('file:')) return;
+    try {
+      if (allowedOrigin && new URL(url).origin === allowedOrigin) return; // 同源导航放行（含 token 302 到干净 URL）
+    } catch { /* fallthrough */ }
     e.preventDefault();
     if (/^https?:/i.test(url)) shell.openExternal(url);
   });
@@ -516,6 +706,7 @@ function publishStatus(stateOrPayload, extra) {
     try { mainWindow.webContents.send('desktop:status', payload); } catch { /* ignore */ }
   }
   if (payload.state === 'ready') {
+    resetManagedRestartState();
     if (mainWindow && !mainWindow.isDestroyed()) loadDshUi(payload.url);
   }
   if (payload.state === 'error' && mainWindow && !mainWindow.isDestroyed()) {
@@ -571,6 +762,8 @@ function toggleWindow() {
 }
 
 async function restartService() {
+  childStopRequested = true;
+  clearManagedRestartTimer();
   stopDshService();
   serviceUrl = null;
   showBootPage({ state: 'starting', message: '正在重启 dsh 服务…' });
